@@ -58,18 +58,44 @@ curl -fsS "https://api.pioneer.ai/v1/models" \
       ] | dedupe;
 
     def model_limits:
-      (.max_input_tokens // .context_window // .contextWindow // null) as $context
-      | (.max_output_tokens // .max_tokens // .maxTokens // null) as $output
-      | if ($context != null and $output != null) then {context: $context, output: $output} else {} end;
+      (.context_window // .contextWindow // .max_context_tokens // .maxContextTokens // .max_input_tokens // null) as $context
+      | (.max_input_tokens // .maxInputTokens // null) as $input
+      | (.max_output_tokens // .max_tokens // .maxTokens // .max_completion_tokens // .maxCompletionTokens // null) as $output
+      | if ($context != null and $output != null) then
+          {context: $context, output: $output}
+          + (if $input != null then {input: $input} else {} end)
+        else {} end;
+
+    def model_cost:
+      (.input_price_per_million // .input_cost_per_million_tokens // .cost.input // null) as $input
+      | (.output_price_per_million // .output_cost_per_million_tokens // .cost.output // null) as $output
+      | (.cache_read_price_per_million // .cost.cache_read // .cost.cache.read // null) as $cache_read
+      | (.cache_write_price_per_million // .cost.cache_write // .cost.cache.write // null) as $cache_write
+      | if ($input != null or $output != null or $cache_read != null or $cache_write != null) then {
+          cost: {
+            input: ($input // 0),
+            output: ($output // 0),
+            cache_read: ($cache_read // ($input // 0)),
+            cache_write: ($cache_write // ($input // 0))
+          }
+        } else {} end;
 
     def opencode_model:
       (reasoning_levels) as $levels
       | ({name: model_name}
         + (if (model_limits | length) > 0 then {limit: model_limits} else {} end)
+        + model_cost
         + (if ($levels | length) > 0 then {
             reasoning: true,
             variants: ($levels | map({key: ., value: {reasoningEffort: .}}) | from_entries)
           } else {} end));
+
+    def auto_model:
+      ([catalog_models[]
+        | select(.deprecated != true)
+        | select(model_id == "pioneer/auto" or model_id == "auto")][0]) as $auto
+      | {id: "pioneer/auto"}
+        + (if $auto != null then ($auto | opencode_model) else {name: "Pioneer Auto"} end);
 
     ($current[0] // {}) + {
       "$schema": "https://opencode.ai/config.json",
@@ -83,13 +109,13 @@ curl -fsS "https://api.pioneer.ai/v1/models" \
             baseURL: "https://api.pioneer.ai/v1"
           },
           models: (
-            {"auto": {"id": "pioneer/auto", "name": "Pioneer Auto"}}
+            {"auto": auto_model}
             + (
               [catalog_models[]
                 | select(.deprecated != true)
                 | select(model_id != null)
                 # Hide Claude Code discovery aliases so OpenCode does not show every model twice.
-                | select(model_id | startswith("anthropic/pioneer/") | not)
+                | select(model_id | startswith("anthropic/") | not)
                 # Add the router once as the pioneer/auto model below, even if /v1/models includes it.
                 | select(model_id != "pioneer/auto" and model_id != "auto")
                 | {key: model_id, value: opencode_model}]
@@ -116,8 +142,10 @@ opencode
 
 OpenCode reads Pioneer's `supported_reasoning_levels` metadata as model variants. For models that advertise thinking levels, use OpenCode's variant selector or start OpenCode with `--variant high` to pick a reasoning effort such as `low`, `medium`, `high`, or `xhigh`.
 
+The setup command also copies `context_window`, `max_input_tokens`, and `max_output_tokens` into OpenCode's `limit` fields, including the default `pioneer/auto` router row. If Pioneer exposes price-per-million metadata in `/v1/models`, the command maps it into OpenCode's `cost` fields for spend estimates.
+
 <Note>
-  The model list is pulled when you run the setup command. Re-run the setup command when you want OpenCode to pick up newly added Pioneer models. The command filters out `anthropic/pioneer/*` discovery aliases because they are only needed for Claude Code and would duplicate models in OpenCode. After setup, OpenCode reads the saved Pioneer credential from `~/.local/share/opencode/auth.json`, so `PIONEER_API_KEY` does not need to be exported in every terminal.
+  The model list is pulled when you run the setup command. Re-run the setup command when you want OpenCode to pick up newly added Pioneer models. The command filters out `anthropic/*` discovery aliases because they are only needed for Claude Code and would duplicate models in OpenCode. After setup, OpenCode reads the saved Pioneer credential from `~/.local/share/opencode/auth.json`, so `PIONEER_API_KEY` does not need to be exported in every terminal.
 </Note>
 
 ## Troubleshooting
